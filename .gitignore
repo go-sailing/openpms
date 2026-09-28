@@ -1,0 +1,38 @@
+# ---------- 依赖 ----------
+node_modules/
+.npm/
+.pnpm-store/
+
+# ---------- 构建产物 ----------
+dist/
+build/
+*.tsbuildinfo
+
+# ---------- 运行期数据（SQLite 数据库与执行日志，由程序自动创建）----------
+data/
+
+# ---------- 本地配置与环境变量 ----------
+.env
+.env.*
+openpms.config.json
+data/config.json
+
+# ---------- 日志 ----------
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------- 编辑器 / 操作系统 ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ---------- 测试与覆盖率 ----------
+coverage/
+.nyc_output/

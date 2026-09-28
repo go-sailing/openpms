@@ -1,0 +1,22 @@
+{
+  "name": "openpms",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenPMS - 智能体项目管理系统",
+  "workspaces": [
+    "apps/server",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w apps/server",
+    "dev:web": "npm run dev -w apps/web",
+    "build": "npm run build -w apps/server && npm run build -w apps/web",
+    "build:server": "npm run build -w apps/server",
+    "build:web": "npm run build -w apps/web",
+    "start": "npm run start -w apps/server",
+    "typecheck": "npm run typecheck -w apps/server && npm run typecheck -w apps/web"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}
