@@ -6,6 +6,7 @@ node_modules/
 # ---------- 构建产物 ----------
 dist/
 build/
+release/
 *.tsbuildinfo
 
 # ---------- 运行期数据（SQLite 数据库与执行日志，由程序自动创建）----------
@@ -32,6 +33,11 @@ pnpm-debug.log*
 *.swo
 .DS_Store
 Thumbs.db
+
+# ---------- Chromium / Electron 运行痕迹 ----------
+SingletonCookie
+SingletonLock
+SingletonSocket
 
 # ---------- 测试与覆盖率 ----------
 coverage/
