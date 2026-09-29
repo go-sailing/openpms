@@ -81,7 +81,13 @@ interface OpencodeEvent {
     text?: string;
     tool?: string;
     callID?: string;
-    state?: { status?: string; input?: unknown; output?: unknown; title?: string };
+    state?: {
+      status?: string;
+      input?: unknown;
+      output?: unknown;
+      title?: string;
+      error?: string;
+    };
     tokens?: unknown;
   };
   error?: unknown;
@@ -206,6 +212,7 @@ export class OpencodeRuntime implements AgentRuntime {
       'run',
       '--format',
       'json',
+      '--thinking',
       '--dir',
       o.workspace,
       '--agent',
@@ -262,16 +269,29 @@ export class OpencodeRuntime implements AgentRuntime {
           if (text) emit({ type: 'thought', text, at });
           break;
         }
-        case 'tool': {
-          const st = ev.part?.state?.status;
-          const tool = ev.part?.tool ?? ev.part?.type ?? 'tool';
-          if (st === 'running' || st === 'pending') {
-            emit({ type: 'tool_call', tool, detail: ev.part?.state?.input, at });
+        // opencode CLI 的工具事件为 { type: 'tool_use', part: { type: 'tool', tool, callID, state } }，
+        // 目标执行期间只发最终态（completed / error），此处两种事件名都兼容。
+        case 'tool':
+        case 'tool_use': {
+          const part = ev.part ?? {};
+          const state = part.state ?? {};
+          const tool = part.tool ?? part.type ?? 'tool';
+          const callId = part.callID ?? null;
+          const title = state.title ?? null;
+          if (state.status === 'running' || state.status === 'pending') {
+            emit({ type: 'tool_call', tool, detail: { callId, title, input: state.input }, at });
           } else {
             emit({
               type: 'tool_result',
               tool,
-              detail: ev.part?.state?.output ?? ev.part?.state,
+              detail: {
+                callId,
+                title,
+                status: state.status ?? null,
+                input: state.input ?? null,
+                output: state.output ?? null,
+                error: state.error ?? null,
+              },
               at,
             });
           }

@@ -74,7 +74,7 @@ const DEFAULTS: OpenPmsConfig = {
   defaultAgentConcurrency: 1,
   schedulerTickMs: 2000,
   dispatchErrorBackoffMs: 30_000,
-  executionTimeoutSec: 1800,
+  executionTimeoutSec: 18000,
   transientRetryMax: 2,
   transientRetryIntervalSec: 30,
   commandBlacklistEnabled: true,
