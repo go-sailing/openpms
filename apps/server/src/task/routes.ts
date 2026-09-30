@@ -132,6 +132,9 @@ export function registerTaskRoutes(app: FastifyInstance, deps: AppDeps): void {
       if (task.status !== 'failed' && task.status !== 'cancelled') {
         throw badRequest('VALIDATION_DENIED', '仅「失败」或「已取消」状态的任务可以重新入队');
       }
+      // 接续上次执行：复用该任务最近一次建立了会话的执行记录（同一 execution、同一会话）；
+      // 若那次执行没建立起会话（如底座未启动成功）则新建执行记录
+      tasks.setResumeExecution(task.id, tasks.latestResumableExecution(task.id)?.executionId ?? null);
       tasks.transition(task.id, 'retry', 'user', null, '用户手动重新入队');
       tasks.resetRetryState(task.id);
       tasks.setScheduleEnabled(task.id, true);

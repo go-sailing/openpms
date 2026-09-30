@@ -6,7 +6,8 @@ import { z } from 'zod';
 import type { AppDeps } from '../http/deps.js';
 import { fail, ok } from '../http/respond.js';
 import { badRequest } from '../platform/errors.js';
-import { TOOL_CATALOG } from '../platform/types.js';
+import { TOOL_CATALOG, type HarnessKind } from '../platform/types.js';
+import { listHarnessModels } from '../runtime/models.js';
 
 const agentInput = z.object({
   name: z.string().min(1),
@@ -14,15 +15,41 @@ const agentInput = z.object({
   avatar: z.string().nullish(),
   systemPrompt: z.string().min(1),
   model: z.string().nullish(),
+  harness: z.enum(['opencode', 'dsh']).optional(),
   maxConcurrency: z.number().int().min(1).max(20).optional(),
   timeoutSec: z.number().int().min(1).nullish(),
   tools: z.array(z.string()).optional(),
 });
 
+const HARNESS_KINDS = ['opencode', 'dsh'] as const;
+
+function isHarnessKind(v: string): v is HarnessKind {
+  return (HARNESS_KINDS as readonly string[]).includes(v);
+}
+
 export function registerAgentRoutes(app: FastifyInstance, deps: AppDeps): void {
   const { agents } = deps;
 
   app.get('/api/v1/tools/catalog', async (_req, reply) => ok(reply, TOOL_CATALOG));
+
+  /**
+   * 某 harness 底座当前可用的模型清单，供智能体编辑页的模型下拉使用。
+   * `?refresh=1` 跳过缓存（用户在底座侧新增了 provider/模型后可立即看到）。
+   */
+  app.get<{ Params: { kind: string }; Querystring: { refresh?: string } }>(
+    '/api/v1/harnesses/:kind/models',
+    async (req, reply) => {
+      try {
+        const kind = req.params.kind;
+        if (!isHarnessKind(kind)) {
+          throw badRequest('VALIDATION_DENIED', `未知的 harness 底座: ${kind}`);
+        }
+        return ok(reply, await listHarnessModels(kind, { refresh: req.query.refresh === '1' }));
+      } catch (e) {
+        return fail(reply, e);
+      }
+    },
+  );
 
   app.get('/api/v1/agents', async (_req, reply) => {
     try {

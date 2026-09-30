@@ -536,6 +536,47 @@ export class TaskService {
     return this.getOrThrow(id);
   }
 
+  // ---------- 执行接续（重试被中断的任务） ----------
+
+  /**
+   * 该任务最近一次「可被接续」的执行：必须已经建立了会话（`session_id` 非空）。
+   * 返回该执行的 id 与它对应的会话 id——重试时要复用的就是这条执行记录。
+   */
+  latestResumableExecution(taskId: string): { executionId: string; sessionId: string } | null {
+    const row = this.db.get<{ id: string; session_id: string }>(
+      `SELECT id, session_id FROM task_executions
+       WHERE task_id = ? AND session_id IS NOT NULL AND session_id <> ''
+       ORDER BY started_at DESC LIMIT 1`,
+      taskId,
+    );
+    return row ? { executionId: row.id, sessionId: row.session_id } : null;
+  }
+
+  /** 登记「下次执行复用该执行记录」；null 表示新建执行记录 */
+  setResumeExecution(taskId: string, executionId: string | null): void {
+    this.db.run('UPDATE tasks SET resume_execution_id = ?, updated_at = ? WHERE id = ?', executionId, now(), taskId);
+  }
+
+  /**
+   * 取走并清空待接续的执行（一次性意图）：执行启动时调用，
+   * 避免同一次意图被后续调度重复使用。返回目标执行与其会话，记录已不存在时返回 null。
+   */
+  takeResumeExecution(taskId: string): { executionId: string; sessionId: string | null } | null {
+    const task = this.db.get<{ resume_execution_id: string | null }>(
+      'SELECT resume_execution_id FROM tasks WHERE id = ?',
+      taskId,
+    );
+    const target = task?.resume_execution_id ?? null;
+    if (!target) return null;
+    this.db.run('UPDATE tasks SET resume_execution_id = NULL WHERE id = ?', taskId);
+    const ex = this.db.get<{ session_id: string | null }>(
+      'SELECT session_id FROM task_executions WHERE id = ?',
+      target,
+    );
+    // 目标执行记录已不存在 → 当作没有接续意图，新建执行
+    return ex ? { executionId: target, sessionId: ex.session_id } : null;
+  }
+
   // ---------- 状态机 ----------
 
   logStatus(

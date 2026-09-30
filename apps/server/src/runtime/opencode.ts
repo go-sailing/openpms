@@ -5,18 +5,21 @@
  * 通过 OPENCODE_CONFIG_CONTENT 按次注入：
  *   - agent.<name>.prompt  → 智能体 System Prompt
  *   - agent.<name>.model   → 模型
- *   - permission           → 工具授权 + 工作目录/命令黑名单沙箱
+ *   - mcp.openpms          → OpenPMS 任务管理工具（仅在授权了 task.* 工具时注册）
+ *
+ * **不下发 permission**：工具授权已通用化，只覆盖 OpenPMS 自己提供的工具（服务端强制），
+ * harness 原生工具（读写文件、命令、网络）交由 opencode 自身默认行为，OpenPMS 不做裁剪。
  *
  * 选择该方式是为隔离 opencode 版本差异：若后续切换到 `opencode serve` + SDK，
  * 只需替换本文件，AgentRuntime 接口不变。
  */
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { config } from '../platform/config.js';
-import { bashPermissionRules } from '../sandbox/index.js';
 import { assembleMessage, assembleSystemPrompt } from './prompt.js';
+import { AsyncQueue, extractMemoryCandidates } from './common.js';
 import type {
   AgentEvent,
   AgentRuntime,
@@ -24,6 +27,9 @@ import type {
   SessionHandle,
   StartSessionOptions,
 } from './types.js';
+
+// 共享件由 common.ts 提供，此处回导以保持既有导入面不变
+export { extractMemoryCandidates } from './common.js';
 
 /** 解析 opencode 可执行文件路径（优先与当前 node 同目录，其次 PATH） */
 export function resolveOpencodeBin(): string {
@@ -39,39 +45,7 @@ export function resolveOpencodeBin(): string {
   return bin;
 }
 
-/** 简单异步队列，用于把子进程事件流转成 AsyncIterable */
-class AsyncQueue<T> {
-  private buffer: T[] = [];
-  private waiters: ((r: IteratorResult<T>) => void)[] = [];
-  private closed = false;
-
-  push(v: T): void {
-    if (this.closed) return;
-    const w = this.waiters.shift();
-    if (w) w({ value: v, done: false });
-    else this.buffer.push(v);
-  }
-
-  close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    while (this.waiters.length) this.waiters.shift()!({ value: undefined as never, done: true });
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<T> {
-    return {
-      next: (): Promise<IteratorResult<T>> => {
-        if (this.buffer.length > 0) {
-          return Promise.resolve({ value: this.buffer.shift()!, done: false });
-        }
-        if (this.closed) {
-          return Promise.resolve({ value: undefined as never, done: true });
-        }
-        return new Promise((resolve) => this.waiters.push(resolve));
-      },
-    };
-  }
-}
+/** 简单异步队列（AsyncQueue）与「记忆沉淀」解析（extractMemoryCandidates）见 common.ts */
 
 interface OpencodeEvent {
   type?: string;
@@ -91,29 +65,6 @@ interface OpencodeEvent {
     tokens?: unknown;
   };
   error?: unknown;
-}
-
-/** 从最终输出中抽取「记忆沉淀」小节 */
-export function extractMemoryCandidates(text: string): string[] {
-  const lines = text.split('\n');
-  const out: string[] = [];
-  let inSection = false;
-  for (const raw of lines) {
-    const line = raw.trim();
-    if (/^#{1,6}\s*记忆沉淀/.test(line) || /^\*\*?记忆沉淀/.test(line)) {
-      inSection = true;
-      continue;
-    }
-    if (inSection) {
-      if (/^#{1,6}\s/.test(line) && !/记忆沉淀/.test(line)) break;
-      const m = /^[-*]\s+(.+)$/.exec(line) || /^\d+[.、]\s*(.+)$/.exec(line);
-      if (m && m[1] && !/^（.*）$/.test(m[1])) out.push(m[1].trim());
-    }
-  }
-  return out
-    .filter((s) => s.length >= 4 && s.length <= 500)
-    .filter((s) => !/^（.*）$/.test(s))
-    .slice(0, 20);
 }
 
 /**
@@ -136,27 +87,9 @@ export class OpencodeRuntime implements AgentRuntime {
 
   private buildConfigContent(o: StartSessionOptions, systemPrompt: string): string {
     const agentKey = `openpms-${o.agent.id}`;
-    const tools = new Set(o.agent.tools);
-
-    const permission: Record<string, unknown> = {
-      read: tools.has('fs.read') ? 'allow' : 'deny',
-      edit: tools.has('fs.edit') ? 'allow' : 'deny',
-      glob: tools.has('fs.glob') ? 'allow' : 'deny',
-      grep: tools.has('fs.grep') ? 'allow' : 'deny',
-      list: tools.has('fs.list') ? 'allow' : 'deny',
-      webfetch: tools.has('webfetch') ? 'allow' : 'deny',
-      websearch: tools.has('websearch') ? 'allow' : 'deny',
-      task: 'deny',
-      // 工作目录沙箱：禁止访问项目目录之外的路径
-      external_directory: 'deny',
-      question: 'deny',
-      doom_loop: 'allow',
-    };
-    permission['bash'] = tools.has('shell') ? bashPermissionRules() : 'deny';
 
     const cfg: Record<string, unknown> = {
       $schema: 'https://opencode.ai/config.json',
-      permission,
       agent: {
         [agentKey]: {
           mode: 'primary',
@@ -167,7 +100,8 @@ export class OpencodeRuntime implements AgentRuntime {
       },
     };
 
-    const hasTaskTools = [...tools].some((t) => t.startsWith('task.'));
+    // 只有授权了 OpenPMS 任务管理工具时才挂载 MCP server（未授权则智能体看不到这些工具）
+    const hasTaskTools = o.agent.tools.some((t) => t.startsWith('task.'));
     if (hasTaskTools && this.opts.mcpServerPath) {
       cfg['mcp'] = {
         openpms: {
@@ -197,6 +131,7 @@ export class OpencodeRuntime implements AgentRuntime {
       completedTaskInjectTokenBudget: config.completedTaskInjectTokenBudget,
     };
     // System Prompt（角色定义 + 经验记忆）与用户消息（运行时上下文 + 任务）分开组装
+    const resume = Boolean(o.resumeSessionId);
     const systemPrompt = assembleSystemPrompt({
       agent: o.agent,
       input: o.input,
@@ -205,9 +140,12 @@ export class OpencodeRuntime implements AgentRuntime {
     const message = assembleMessage({
       agent: o.agent,
       input: o.input,
+      resume,
       limits: injectLimits,
     });
 
+    // 未指定模型时不传 --model，交给 opencode 自身的默认模型
+    const model = o.agent.model?.trim();
     const args = [
       'run',
       '--format',
@@ -217,8 +155,9 @@ export class OpencodeRuntime implements AgentRuntime {
       o.workspace,
       '--agent',
       agentKey,
-      '--model',
-      o.agent.model ?? config.defaultModel,
+      ...(model ? ['--model', model] : []),
+      // 接续被中断的任务：在该会话上继续，而不是新建会话
+      ...(o.resumeSessionId ? ['--session', o.resumeSessionId] : []),
       message,
     ];
 

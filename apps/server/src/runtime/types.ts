@@ -102,6 +102,11 @@ export interface StartSessionOptions {
   taskId: string;
   /** 用于智能体回调 OpenPMS 工具接口的令牌 */
   toolToken?: string;
+  /**
+   * 接续已有会话的 id（任务被中断后用户重试时传入）：
+   * 运行时据此在该会话上继续，而不是新建会话；为空则新建。
+   */
+  resumeSessionId?: string | null;
   signal: AbortSignal;
 }
 

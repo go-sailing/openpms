@@ -5,6 +5,10 @@
  *      → 经验记忆
  *      → 运行时上下文（项目信息、项目成员、项目已完成历史任务、当前任务、可用工具）
  *      → 用户指令（任务描述）
+ *
+ * 接续运行（任务被中断后重试/续跑）时不重复下发上述用户消息：这部分内容已随首次执行
+ * 进入会话历史，再发一遍只会让同一份上下文在会话里重复出现，故只下发极简继续指令。
+ * System Prompt 不走会话历史（底座每次请求按 agent 配置重新组装），仍照常下发。
  */
 import type { AgentConfigForRun, SessionInput } from './types.js';
 import { TOOL_CATALOG } from '../platform/types.js';
@@ -28,6 +32,8 @@ function trimByTokens(items: string[], tokenBudget: number, max: number): string
 export interface AssembleOptions {
   agent: AgentConfigForRun;
   input: SessionInput;
+  /** 本次是否在既有会话上接续运行（任务被中断后重试/续跑）：为真则只下发极简继续指令 */
+  resume?: boolean;
   limits: {
     memoryInjectMax: number;
     memoryInjectTokenBudget: number;
@@ -35,6 +41,13 @@ export interface AssembleOptions {
     completedTaskInjectTokenBudget: number;
   };
 }
+
+/**
+ * 接续运行时下发的极简指令。
+ * 首次执行的完整用户消息（运行时上下文 + 任务 + 约束）已在会话历史里，
+ * 这里只给一句「接着做」，让被中断的执行继续往下跑。
+ */
+export const RESUME_MESSAGE = '继续执行未完成的部分。';
 
 /**
  * 组装 System Prompt：智能体角色定义 + 经验记忆。
@@ -58,6 +71,9 @@ export function assembleSystemPrompt(opts: AssembleOptions): string {
 
 /** 组装发送给智能体的用户消息（运行时上下文 + 用户指令；System Prompt 由 agent 配置承载） */
 export function assembleMessage(opts: AssembleOptions): string {
+  // 接续运行：上下文已在会话历史里，不再重复注入，只下发极简继续指令
+  if (opts.resume) return RESUME_MESSAGE;
+
   const { agent, input, limits } = opts;
   const parts: string[] = [];
 
@@ -97,11 +113,16 @@ export function assembleMessage(opts: AssembleOptions): string {
   parts.push(`- 工作目录：${input.workspace}`);
   parts.push(`- 交付要求：${input.taskDescription}`);
 
-  parts.push('', '## 可用工具');
+  // 工具授权只覆盖 OpenPMS 自己提供的工具；底座原生能力始终可用，须显式告知智能体，
+  // 否则它可能误以为自己不能读写文件。
+  parts.push('', '## 可用的 OpenPMS 工具');
   const toolLabels = agent.tools
     .map((t) => TOOL_CATALOG.find((c) => c.name === t)?.label ?? t)
     .join('、');
   parts.push(`- ${toolLabels || '（无）'}`);
+  parts.push(
+    '- 除上述工具外，文件读写/检索、命令执行、网络访问等能力由运行时底座自身提供，无需授权即可直接使用。',
+  );
 
   parts.push('', '## 约束');
   parts.push('- 所有文件读写与命令执行必须限制在工作目录内，禁止越权访问其他路径。');

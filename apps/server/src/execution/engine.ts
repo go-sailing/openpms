@@ -12,14 +12,14 @@ import { now } from '../platform/time.js';
 import { AppError, badRequest, notFound } from '../platform/errors.js';
 import { bus } from '../platform/events.js';
 import { validateWorkspace } from '../sandbox/index.js';
-import type { AgentRow, ExecutionRow, TaskRow } from '../platform/types.js';
+import { normalizeHarness, type AgentRow, type ExecutionRow, type TaskRow } from '../platform/types.js';
 import type { AgentService } from '../agent/service.js';
 import type { ProjectService } from '../project/service.js';
 import type { TaskService } from '../task/service.js';
 import { ExecutionLogWriter } from './logs.js';
+import type { RuntimeRegistry } from '../runtime/index.js';
 import type {
   AgentConfigForRun,
-  AgentRuntime,
   CompletedTaskSummary,
   ExecutionResult,
   MemoryItem,
@@ -51,7 +51,7 @@ export class ExecutionEngine {
     private readonly agents: AgentService,
     private readonly projects: ProjectService,
     private readonly tasks: TaskService,
-    private readonly runtime: AgentRuntime,
+    private readonly runtimes: RuntimeRegistry,
   ) {}
 
   // ---------- 槽位与状态 ----------
@@ -118,6 +118,8 @@ export class ExecutionEngine {
       // 手动启动：pending → running（start_manual）；queued → running（用户强制派发）
       // 已取消任务：先重新入队（cancelled → queued）再派发（queued → running）
       if (task.status === 'cancelled') {
+        // 「重新执行已取消的任务」同样接续上次执行（复用其执行记录与会话）
+        this.tasks.setResumeExecution(task.id, this.tasks.latestResumableExecution(task.id)?.executionId ?? null);
         this.tasks.transition(task.id, 'retry', 'user', opts.actorId ?? null, '重新执行已取消的任务');
         this.tasks.resetRetryState(task.id);
         this.tasks.transition(task.id, 'dispatch', 'user', opts.actorId ?? null, '用户手动启动');
@@ -128,23 +130,37 @@ export class ExecutionEngine {
       }
     }
 
-    // 创建执行记录
-    const executionId = idGen.execution();
+    // 执行记录：重试被中断的任务时**复用那次执行的记录**（同一 execution、同一日志文件），
+    // 否则新建一条。复用与否由 tasks.resume_execution_id 决定，这里消费一次。
     const ts = now();
-    this.db.run(
-      `INSERT INTO task_executions (id, task_id, agent_id, trigger_type, retry_no, status,
-                                    workspace, started_at, log_path)
-       VALUES (?, ?, ?, ?, ?, 'running', ?, ?, NULL)`,
-      executionId,
-      task.id,
-      task.agent_id,
-      opts.triggerType,
-      task.retry_no,
-      task.workspace,
-      ts,
-    );
-    const logPath = new ExecutionLogWriter(executionId).path;
-    this.db.run('UPDATE task_executions SET log_path = ? WHERE id = ?', logPath, executionId);
+    const resume = this.tasks.takeResumeExecution(task.id);
+    const executionId = resume?.executionId ?? idGen.execution();
+    if (resume) {
+      // 回到 running 并清掉上一次的结束信息；started_at / log_path / 会话 id 保持不变，
+      // 这样执行历史里仍是「同一次执行」，日志也接在同一份文件后面。
+      this.db.run(
+        `UPDATE task_executions
+         SET status = 'running', finished_at = NULL, error = NULL, result = NULL, workspace = ?
+         WHERE id = ?`,
+        task.workspace,
+        executionId,
+      );
+    } else {
+      this.db.run(
+        `INSERT INTO task_executions (id, task_id, agent_id, trigger_type, retry_no, status,
+                                      workspace, started_at, log_path)
+         VALUES (?, ?, ?, ?, ?, 'running', ?, ?, NULL)`,
+        executionId,
+        task.id,
+        task.agent_id,
+        opts.triggerType,
+        task.retry_no,
+        task.workspace,
+        ts,
+      );
+      const logPath = new ExecutionLogWriter(executionId).path;
+      this.db.run('UPDATE task_executions SET log_path = ? WHERE id = ?', logPath, executionId);
+    }
     this.db.run('UPDATE tasks SET locked_by = ?, locked_at = ?, updated_at = ? WHERE id = ?',
       opts.triggerType, ts, ts, task.id);
 
@@ -152,11 +168,16 @@ export class ExecutionEngine {
       type: 'execution.started',
       taskId: task.id,
       projectId: task.project_id,
-      payload: { executionId, agentId: task.agent_id, triggerType: opts.triggerType },
+      payload: {
+        executionId,
+        agentId: task.agent_id,
+        triggerType: opts.triggerType,
+        resumed: Boolean(resume),
+      },
     });
 
     // 异步执行，不阻塞调用方
-    void this.run(task, agent, executionId, opts).catch((err) => {
+    void this.run(task, agent, executionId, opts, resume?.sessionId ?? null).catch((err) => {
       this.finalizeError(task.id, executionId, err as Error);
     });
 
@@ -169,9 +190,10 @@ export class ExecutionEngine {
     agent: AgentRow,
     executionId: string,
     opts: StartOptions,
+    resumeSessionId: string | null,
   ): Promise<void> {
     try {
-      await this.runInner(task, agent, executionId, opts);
+      await this.runInner(task, agent, executionId, opts, resumeSessionId);
     } catch (err) {
       const msg = (err as Error).message;
       const writer = new ExecutionLogWriter(executionId);
@@ -190,6 +212,7 @@ export class ExecutionEngine {
     agent: AgentRow,
     executionId: string,
     opts: StartOptions,
+    resumeSessionId: string | null,
   ): Promise<void> {
     const controller = new AbortController();
     const info: RunningInfo = {
@@ -237,11 +260,26 @@ export class ExecutionEngine {
     const completedTasks = this.completedTasksOfProject(task.project_id);
     const members = this.assignableMembers(task.project_id, agent.id);
 
+    // 底座由智能体自身决定（agents.harness），同一次服务内不同智能体可各走各的运行时
+    const harness = normalizeHarness(agent.harness);
+    const runtime = this.runtimes.get(harness);
+
+    // 接续运行：复用同一条执行记录，日志也接在同一份文件后面，这里打一条分隔说明
+    if (resumeSessionId) {
+      writer.append({
+        type: 'system',
+        text: `接续执行：复用执行记录 ${executionId}，在其会话 ${resumeSessionId} 上继续`,
+      });
+    }
+
     writer.append({
       type: 'system',
       text: '开始执行',
       task: { id: task.id, name: task.name },
       agent: { id: agent.id, name: agent.name },
+      harness,
+      // 有值表示本次在既有会话上接续运行，而非新建会话
+      resumeSessionId: resumeSessionId ?? null,
       workspace: task.workspace,
       triggerType: opts.triggerType,
       memoryCount: memories.length,
@@ -250,7 +288,7 @@ export class ExecutionEngine {
 
     let handle: SessionHandle;
     try {
-      handle = await this.runtime.startSession({
+      handle = await runtime.startSession({
         agent: agentConfig,
         workspace: task.workspace,
         input: {
@@ -266,6 +304,7 @@ export class ExecutionEngine {
         executionId,
         taskId: task.id,
         toolToken: executionId,
+        resumeSessionId,
         signal: controller.signal,
       });
       info.handle = handle;
@@ -280,6 +319,7 @@ export class ExecutionEngine {
     }
 
     // 流式消费事件
+    let sessionPersisted = false;
     try {
       for await (const ev of handle.events) {
         writer.append(ev as unknown as Record<string, unknown>);
@@ -289,6 +329,12 @@ export class ExecutionEngine {
           projectId: task.project_id,
           payload: { executionId, event: ev },
         });
+        // 会话 id 一旦确定就落库（只写一次）：这样即使进程被杀/服务重启，
+        // 中断后的重试仍能在这个会话上接续。
+        if (!sessionPersisted && handle.sessionId) {
+          sessionPersisted = true;
+          this.db.run('UPDATE task_executions SET session_id = ? WHERE id = ?', handle.sessionId, executionId);
+        }
       }
     } catch (err) {
       writer.append({ type: 'system', text: `事件流异常: ${(err as Error).message}` });
@@ -447,6 +493,8 @@ export class ExecutionEngine {
         fresh.retry_backoff === 'exponential'
           ? intervalSec * 1000 * Math.pow(2, fresh.retry_no)
           : intervalSec * 1000;
+      // 自动重试同样接续本次执行：复用这条执行记录并在其会话上继续
+      this.tasks.setResumeExecution(task.id, result.sessionId ? executionId : null);
       if (fresh.status === 'running') {
         const note = result.retryable ? '（可重试错误）' : '';
         this.tasks.transition(task.id, 'fail_retryable', 'system', null,
@@ -510,6 +558,8 @@ export class ExecutionEngine {
     if (task.status !== 'running' && task.status !== 'queued' && task.status !== 'pending') {
       throw badRequest('VALIDATION_DENIED', `当前状态（${task.status}）不可取消`);
     }
+    // 清空待接续意图：取消后该次尝试已作废，避免被后续（如周期任务下一轮）误用
+    this.tasks.setResumeExecution(taskId, null);
     if (task.status === 'running') {
       const info = [...this.running.values()].find((i) => i.taskId === taskId);
       if (info) {
@@ -549,6 +599,9 @@ export class ExecutionEngine {
       if (task.status !== 'running') continue;
 
       if (task.retry_no < task.retry_max) {
+        // 重启中断后的自动重试，同样复用该执行记录并在其会话上接续
+        // （会话 id 在事件流开始时即已落库，因此这里能用）
+        this.tasks.setResumeExecution(task.id, ex.session_id ? ex.id : null);
         this.tasks.transition(task.id, 'fail_retryable', 'system', null, '服务重启中断，自动重试');
         this.db.run(
           'UPDATE tasks SET retry_no = retry_no + 1, not_before = ?, updated_at = ? WHERE id = ?',

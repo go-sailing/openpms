@@ -3,29 +3,23 @@
  */
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { existsSync } from 'node:fs';
 import type { AppDeps } from '../http/deps.js';
 import { fail, ok } from '../http/respond.js';
 import { config } from '../platform/config.js';
 import { wsClientCount } from '../http/ws.js';
-import { resolveOpencodeBin } from '../runtime/opencode.js';
-import { checkCommand, DEFAULT_COMMAND_BLACKLIST } from '../sandbox/index.js';
+import { describeHarnesses } from '../runtime/index.js';
 
 export function registerSystemRoutes(app: FastifyInstance, deps: AppDeps): void {
   const { scheduler } = deps;
 
   app.get('/api/v1/system/health', async (_req, reply) => {
-    const bin = resolveOpencodeBin();
     return ok(reply, {
       ok: true,
       version: '0.1.0',
       uptimeSec: Math.round(process.uptime()),
       wsClients: wsClientCount(),
-      opencode: {
-        bin,
-        available: existsSync(bin) || bin !== config.opencodeBin,
-        defaultModel: config.defaultModel,
-      },
+      // 各 harness 底座的可用性（底座由每个智能体各自选择；模型清单见 GET /harnesses/:kind/models）
+      harnesses: describeHarnesses(),
     });
   });
 
@@ -59,24 +53,5 @@ export function registerSystemRoutes(app: FastifyInstance, deps: AppDeps): void 
   app.get('/api/v1/system/config', async (_req, reply) => {
     const { dbPath, logDir, ...rest } = config;
     return ok(reply, { ...rest, dbPath, logDir });
-  });
-
-  /** 命令黑名单预检（与下发给 opencode 的 permission.bash 使用同一规则集） */
-  app.post('/api/v1/system/command-check', async (req, reply) => {
-    try {
-      const body = z.object({ command: z.string() }).parse(req.body);
-      return ok(reply, checkCommand(body.command));
-    } catch (e) {
-      return fail(reply, e);
-    }
-  });
-
-  app.get('/api/v1/system/command-blacklist', async (_req, reply) => {
-    return ok(reply, {
-      enabled: config.commandBlacklistEnabled,
-      rules: DEFAULT_COMMAND_BLACKLIST,
-      extra: config.commandBlacklistExtra,
-      whitelist: config.commandWhitelist,
-    });
   });
 }

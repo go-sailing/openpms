@@ -8,7 +8,7 @@ import { now } from '../platform/time.js';
 import { AppError, badRequest, notFound } from '../platform/errors.js';
 import { config } from '../platform/config.js';
 import { bus } from '../platform/events.js';
-import { TOOL_CATALOG, type AgentRow, type MemoryRow } from '../platform/types.js';
+import { TOOL_CATALOG, normalizeHarness, type AgentRow, type HarnessKind, type MemoryRow } from '../platform/types.js';
 
 export interface AgentDTO {
   id: string;
@@ -17,6 +17,8 @@ export interface AgentDTO {
   avatar: string | null;
   systemPrompt: string;
   model: string | null;
+  /** 执行该智能体任务时使用的 harness 底座 */
+  harness: HarnessKind;
   status: string;
   maxConcurrency: number;
   timeoutSec: number | null;
@@ -32,6 +34,7 @@ export interface AgentInput {
   avatar?: string | null;
   systemPrompt: string;
   model?: string | null;
+  harness?: HarnessKind;
   maxConcurrency?: number;
   timeoutSec?: number | null;
   tools?: string[];
@@ -55,6 +58,7 @@ function rowToDTO(row: AgentRow, tools: string[]): AgentDTO {
     avatar: row.avatar,
     systemPrompt: row.system_prompt,
     model,
+    harness: normalizeHarness(row.harness),
     status: row.status,
     maxConcurrency: row.max_concurrency,
     timeoutSec: row.timeout_sec,
@@ -103,22 +107,24 @@ export class AgentService {
     const dup = this.db.get<{ id: string }>('SELECT id FROM agents WHERE name = ? AND deleted_at IS NULL', input.name);
     if (dup) throw badRequest('CONFLICT', `智能体名称已存在: ${input.name}`);
 
-    const tools = input.tools ?? ['fs.read', 'fs.glob', 'fs.grep', 'fs.list'];
+    // 默认只给「查询/回写」类的最小 OpenPMS 工具集，高风险工具（拆解子任务、改派）需显式授予
+    const tools = input.tools ?? ['task.list_my', 'task.update_status', 'task.submit_result'];
     this.assertTools(tools);
 
     const ts = now();
     const id = idGen.agent();
     this.db.tx(() => {
       this.db.run(
-        `INSERT INTO agents (id, name, role, avatar, system_prompt, model_config, status,
+        `INSERT INTO agents (id, name, role, avatar, system_prompt, model_config, harness, status,
                              max_concurrency, timeout_sec, is_builtin, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'enabled', ?, ?, 0, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'enabled', ?, ?, 0, ?, ?)`,
         id,
         input.name.trim(),
         input.role ?? null,
         input.avatar ?? null,
         input.systemPrompt,
         input.model ? JSON.stringify({ model: input.model }) : null,
+        normalizeHarness(input.harness),
         input.maxConcurrency ?? config.defaultAgentConcurrency,
         input.timeoutSec ?? null,
         ts,
@@ -149,7 +155,7 @@ export class AgentService {
     this.db.tx(() => {
       this.db.run(
         `UPDATE agents SET name = ?, role = ?, avatar = ?, system_prompt = ?, model_config = ?,
-                           max_concurrency = ?, timeout_sec = ?, updated_at = ?
+                           harness = ?, max_concurrency = ?, timeout_sec = ?, updated_at = ?
          WHERE id = ?`,
         input.name ?? row.name,
         input.role !== undefined ? input.role : row.role,
@@ -160,6 +166,7 @@ export class AgentService {
             ? JSON.stringify({ model: input.model })
             : null
           : row.model_config,
+        input.harness !== undefined ? normalizeHarness(input.harness) : row.harness,
         input.maxConcurrency ?? row.max_concurrency,
         input.timeoutSec !== undefined ? input.timeoutSec : row.timeout_sec,
         ts,

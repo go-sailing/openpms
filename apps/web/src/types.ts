@@ -13,6 +13,9 @@ export interface ApiEnvelope<T> {
 
 export type AgentStatus = 'enabled' | 'disabled';
 
+/** harness 底座：智能体执行所用的运行时，每个智能体各自选择 */
+export type HarnessKind = 'opencode' | 'dsh';
+
 export interface Agent {
   id: string;
   name: string;
@@ -20,6 +23,7 @@ export interface Agent {
   avatar: string | null;
   systemPrompt: string;
   model: string | null;
+  harness: HarnessKind;
   status: AgentStatus;
   maxConcurrency: number;
   timeoutSec: number | null;
@@ -34,9 +38,27 @@ export interface AgentInput {
   role?: string | null;
   systemPrompt: string;
   model?: string | null;
+  harness?: HarnessKind;
   maxConcurrency?: number;
   timeoutSec?: number | null;
   tools?: string[];
+}
+
+/** 各 harness 底座的可用性（底座由每个智能体各自选择） */
+export interface HarnessDescriptor {
+  kind: HarnessKind;
+  bin: string;
+  available: boolean;
+  note?: string;
+}
+
+/** 某底座当前可用的模型清单 */
+export interface HarnessModelList {
+  kind: HarnessKind;
+  models: string[];
+  /** cli = 调用底座命令实时拉取；builtin = 底座内置目录 */
+  source: 'cli' | 'builtin';
+  note?: string;
 }
 
 export interface Memory {
@@ -52,7 +74,6 @@ export interface ToolCatalogItem {
   name: string;
   label: string;
   risk: string;
-  permissionKey: string;
 }
 
 /* ---------------- 项目与成员 ---------------- */
@@ -193,11 +214,8 @@ export interface HealthStatus {
   version: string;
   uptimeSec: number;
   wsClients: number;
-  opencode: {
-    bin: string;
-    available: boolean;
-    defaultModel: string;
-  };
+  /** 各 harness 底座的可用性（旧版后端可能不返回，故为可选） */
+  harnesses?: HarnessDescriptor[];
 }
 
 export type SystemConfig = Record<string, unknown>;

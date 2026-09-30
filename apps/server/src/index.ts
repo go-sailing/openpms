@@ -13,7 +13,7 @@ import { AgentService } from './agent/service.js';
 import { ProjectService } from './project/service.js';
 import { TaskService } from './task/service.js';
 import { ToolService } from './tools/service.js';
-import { OpencodeRuntime, resolveOpencodeBin } from './runtime/opencode.js';
+import { createRuntimes, describeHarnesses } from './runtime/index.js';
 import { ExecutionEngine } from './execution/engine.js';
 import { Scheduler } from './scheduler/index.js';
 import { buildServer } from './http/server.js';
@@ -26,6 +26,9 @@ const webDistDir = process.env.OPENPMS_WEB_DIST ?? resolve(here, '..', '..', 'we
 
 async function main(): Promise<void> {
   mkdirSync(config.logDir, { recursive: true });
+  // DSH_HOME 只在显式配置时才创建并下发，默认留给 dsh 自身默认目录，
+  // 以复用用户已配置的凭据；dsh 的 patch 目录由 DshRuntime 在执行时按需创建。
+  if (config.dshHome) mkdirSync(config.dshHome, { recursive: true });
 
   const db = new Db(config.dbPath);
   migrate(db);
@@ -35,8 +38,8 @@ async function main(): Promise<void> {
   const agents = new AgentService(db);
   const projects = new ProjectService(db);
   const tasks = new TaskService(db);
-  const runtime = new OpencodeRuntime({ mcpServerPath });
-  const engine = new ExecutionEngine(db, agents, projects, tasks, runtime);
+  const runtimes = createRuntimes({ mcpServerPath });
+  const engine = new ExecutionEngine(db, agents, projects, tasks, runtimes);
   const scheduler = new Scheduler(db, tasks, projects, agents, settings, engine);
   const tools = new ToolService(db, agents, projects, tasks);
 
@@ -48,17 +51,21 @@ async function main(): Promise<void> {
 
   await app.listen({ port: config.port, host: '127.0.0.1' });
 
-  const bin = resolveOpencodeBin();
+  const harnesses = describeHarnesses();
   app.log.info(
     {
       port: config.port,
       db: config.dbPath,
-      opencode: bin,
-      model: config.defaultModel,
+      // 各 harness 底座的可用性；底座由每个智能体各自选择，不存在全局档位
+      harnesses: harnesses.map((h) => ({
+        kind: h.kind,
+        bin: h.bin,
+        available: h.available,
+        ...(h.note ? { note: h.note } : {}),
+      })),
       globalMaxConcurrency: config.globalMaxConcurrency,
       executionTimeoutSec: config.executionTimeoutSec,
       schedulerTickMs: config.schedulerTickMs,
-      commandBlacklist: config.commandBlacklistEnabled,
     },
     'OpenPMS 已启动',
   );

@@ -173,21 +173,17 @@ export function OverviewPage() {
               <span className="kv-k">WS 客户端</span>
               <span className="kv-v">{health.wsClients}</span>
             </div>
-            <div className="kv">
-              <span className="kv-k">opencode 可用</span>
-              <span className="kv-v">
-                <span className={`dot ${health.opencode.available ? 'dot-green' : 'dot-red'}`} />
-                {health.opencode.available ? '可用' : '不可用'}
-              </span>
-            </div>
-            <div className="kv">
-              <span className="kv-k">默认模型</span>
-              <span className="kv-v mono">{health.opencode.defaultModel || '—'}</span>
-            </div>
-            <div className="kv wide">
-              <span className="kv-k">opencode 路径</span>
-              <span className="kv-v mono">{health.opencode.bin}</span>
-            </div>
+            {(health.harnesses ?? []).map((h) => (
+              <div className="kv wide" key={h.kind}>
+                <span className="kv-k">底座 {h.kind}</span>
+                <span className="kv-v">
+                  <span className={`dot ${h.available ? 'dot-green' : 'dot-red'}`} />
+                  {h.available ? '可用' : '不可用'}
+                  <span className="mono muted small"> · {h.bin}</span>
+                  {h.note ? <span className="small"> · {h.note}</span> : null}
+                </span>
+              </div>
+            ))}
           </div>
         ) : (
           <div className="empty small">暂无健康信息</div>

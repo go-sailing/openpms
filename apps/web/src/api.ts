@@ -6,6 +6,8 @@ import type {
   Agent,
   AgentInput,
   Execution,
+  HarnessKind,
+  HarnessModelList,
   HealthStatus,
   Member,
   Memory,
@@ -106,6 +108,8 @@ export const api = {
   deleteMemory: (memoryId: string) => del<{ removed: boolean }>(`/memories/${memoryId}`),
 
   toolCatalog: () => get<ToolCatalogItem[]>('/tools/catalog'),
+  harnessModels: (kind: HarnessKind, opts: { refresh?: boolean } = {}) =>
+    get<HarnessModelList>(`/harnesses/${kind}/models`, { refresh: opts.refresh ? '1' : undefined }),
 
   /* ---------------- 项目与成员 ---------------- */
 

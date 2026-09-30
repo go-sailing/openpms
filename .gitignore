@@ -29,6 +29,7 @@ pnpm-debug.log*
 # ---------- 编辑器 / 操作系统 ----------
 .vscode/
 .idea/
+.trae/
 *.swp
 *.swo
 .DS_Store

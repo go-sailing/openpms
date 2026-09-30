@@ -47,13 +47,17 @@ function findFreePort(): Promise<number> {
 
 /**
  * 桌面启动时 PATH 往往不含 shell 里配置的目录，这里补充 opencode / node 的常见安装位置，
- * 保证智能体执行时能找到 opencode CLI。
+ * 保证智能体执行时能找到所选运行时的 CLI（opencode / dsh）。
  */
 function buildPath(): string {
   const home = homedir();
   const extra = [
     join(home, '.opencode', 'bin'),
     join(home, '.local', 'bin'),
+    // dsh（DeepSeek Harness）的常见安装位置
+    join(home, '.dsh', 'bin'),
+    join(home, '.npm-global', 'bin'),
+    join(home, '.bun', 'bin'),
     '/usr/local/bin',
     '/usr/bin',
     '/bin',

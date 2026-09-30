@@ -8,8 +8,14 @@ import { Empty } from '../components/Empty';
 import { Modal } from '../components/Modal';
 import { StatusBadge } from '../components/StatusBadge';
 import { useToast } from '../components/Toast';
-import type { Agent, AgentInput, Memory, ToolCatalogItem } from '../types';
+import type { Agent, AgentInput, HarnessKind, HarnessModelList, Memory, ToolCatalogItem } from '../types';
 import { formatTime, riskLabel, truncate } from '../utils';
+
+/** harness 底座选项；与后端 AgentRow.harness 的取值保持一致 */
+const HARNESS_OPTIONS: { kind: HarnessKind; label: string; hint: string }[] = [
+  { kind: 'opencode', label: 'opencode', hint: '逐 token 实时流式' },
+  { kind: 'dsh', label: 'DeepSeek Harness', hint: '步骤级事件' },
+];
 
 interface AgentForm {
   id: string | null;
@@ -17,6 +23,7 @@ interface AgentForm {
   role: string;
   systemPrompt: string;
   model: string;
+  harness: HarnessKind;
   maxConcurrency: string;
   timeoutSec: string;
   tools: string[];
@@ -28,6 +35,7 @@ const EMPTY_FORM: AgentForm = {
   role: '',
   systemPrompt: '',
   model: '',
+  harness: 'opencode',
   maxConcurrency: '1',
   timeoutSec: '',
   tools: [],
@@ -40,10 +48,15 @@ function toForm(agent: Agent): AgentForm {
     role: agent.role ?? '',
     systemPrompt: agent.systemPrompt,
     model: agent.model ?? '',
+    harness: agent.harness,
     maxConcurrency: String(agent.maxConcurrency),
     timeoutSec: agent.timeoutSec === null ? '' : String(agent.timeoutSec),
     tools: [...agent.tools],
   };
+}
+
+function harnessLabel(kind: HarnessKind): string {
+  return HARNESS_OPTIONS.find((h) => h.kind === kind)?.label ?? kind;
 }
 
 export function AgentsPage() {
@@ -57,6 +70,33 @@ export function AgentsPage() {
 
   const [memoryAgent, setMemoryAgent] = useState<Agent | null>(null);
   const [memories, setMemories] = useState<Memory[]>([]);
+
+  // 模型候选：按当前表单选中的底座拉取
+  const [modelList, setModelList] = useState<HarnessModelList | null>(null);
+  const [modelLoading, setModelLoading] = useState(false);
+
+  const loadModels = useCallback(
+    async (kind: HarnessKind, opts: { refresh?: boolean } = {}) => {
+      setModelLoading(true);
+      try {
+        setModelList(await api.harnessModels(kind, opts));
+      } catch (e) {
+        setModelList(null);
+        toast.error(e instanceof ApiError ? e.message : String(e));
+      } finally {
+        setModelLoading(false);
+      }
+    },
+    [toast],
+  );
+
+  const openForm = useCallback(
+    (next: AgentForm) => {
+      setForm(next);
+      void loadModels(next.harness);
+    },
+    [loadModels],
+  );
 
   const load = useCallback(async () => {
     try {
@@ -85,6 +125,7 @@ export function AgentsPage() {
       role: form.role.trim() || null,
       systemPrompt: form.systemPrompt,
       model: form.model.trim() || null,
+      harness: form.harness,
       maxConcurrency: Math.min(20, Math.max(1, Number(form.maxConcurrency) || 1)),
       timeoutSec: form.timeoutSec ? Math.max(1, Number(form.timeoutSec)) : null,
       tools: form.tools,
@@ -177,7 +218,7 @@ export function AgentsPage() {
           <button type="button" className="btn btn-ghost" onClick={() => void load()}>
             刷新
           </button>
-          <button type="button" className="btn btn-primary" onClick={() => setForm({ ...EMPTY_FORM })}>
+          <button type="button" className="btn btn-primary" onClick={() => openForm({ ...EMPTY_FORM })}>
             新增智能体
           </button>
         </div>
@@ -196,6 +237,7 @@ export function AgentsPage() {
               <th>状态</th>
               <th>工具数</th>
               <th>类型</th>
+              <th>底座</th>
               <th>模型</th>
               <th>更新时间</th>
               <th className="col-actions">操作</th>
@@ -215,10 +257,11 @@ export function AgentsPage() {
                 </td>
                 <td>{agent.tools.length}</td>
                 <td>{agent.isBuiltin ? <span className="tag">内置</span> : <span className="tag tag-plain">自定义</span>}</td>
+                <td>{harnessLabel(agent.harness)}</td>
                 <td className="mono muted">{agent.model || '默认'}</td>
                 <td className="muted small">{formatTime(agent.updatedAt)}</td>
                 <td className="col-actions">
-                  <button type="button" className="btn btn-xs" onClick={() => setForm(toForm(agent))}>
+                  <button type="button" className="btn btn-xs" onClick={() => openForm(toForm(agent))}>
                     编辑
                   </button>
                   <button type="button" className="btn btn-xs" onClick={() => void toggleStatus(agent)}>
@@ -271,13 +314,58 @@ export function AgentsPage() {
               />
             </label>
             <label className="field">
-              <span>模型</span>
+              <span>Harness 底座</span>
+              <select
+                value={form.harness}
+                onChange={(e) => {
+                  const kind = e.target.value as HarnessKind;
+                  // 底座切换后模型候选随之变化；已填的模型可能不再适用于新底座，故一并清空
+                  setForm({ ...form, harness: kind, model: '' });
+                  void loadModels(kind);
+                }}
+              >
+                {HARNESS_OPTIONS.map((option) => (
+                  <option key={option.kind} value={option.kind}>
+                    {option.label}（{option.hint}）
+                  </option>
+                ))}
+              </select>
+            </label>
+            {/* 用 div 而非 label 包裹：内部含「刷新列表」按钮，嵌套在 label 里会连带触发输入框 */}
+            <div className="field">
+              <span>
+                模型
+                <button
+                  type="button"
+                  className="link small"
+                  style={{ marginLeft: 8 }}
+                  onClick={() => void loadModels(form.harness, { refresh: true })}
+                  disabled={modelLoading}
+                >
+                  {modelLoading ? '加载中…' : '刷新列表'}
+                </button>
+              </span>
               <input
+                list="agent-model-options"
                 value={form.model}
                 onChange={(e) => setForm({ ...form, model: e.target.value })}
-                placeholder="留空使用系统默认模型"
+                placeholder="留空则用该底座自身的默认模型"
               />
-            </label>
+              <datalist id="agent-model-options">
+                {(modelList?.models ?? []).map((m) => (
+                  <option key={m} value={m} />
+                ))}
+              </datalist>
+              <span className="muted small">
+                {modelList?.note
+                  ? modelList.note
+                  : modelList
+                    ? `该底座可用模型 ${modelList.models.length} 个${
+                        modelList.source === 'builtin' ? '（内置目录）' : ''
+                      }`
+                    : '未能获取模型列表，可直接手动填写'}
+              </span>
+            </div>
             <label className="field">
               <span>最大并发</span>
               <input

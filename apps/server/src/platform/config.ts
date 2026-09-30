@@ -30,12 +30,6 @@ export interface OpenPmsConfig {
   transientRetryMax: number;
   /** 兜底重试的间隔（秒），仅当任务自身未配置重试间隔时生效 */
   transientRetryIntervalSec: number;
-  /** 是否启用默认命令黑名单 */
-  commandBlacklistEnabled: boolean;
-  /** 额外新增的命令黑名单规则（正则字符串） */
-  commandBlacklistExtra: string[];
-  /** 命令黑名单豁免规则（正则字符串，优先于黑名单） */
-  commandWhitelist: string[];
   /** 允许作为工作目录的根路径白名单；为空表示不限制（仅校验存在性） */
   workspaceRoots: string[];
   /** 记忆沉淀模式：auto 自动沉淀 */
@@ -50,10 +44,27 @@ export interface OpenPmsConfig {
   completedTaskInjectTokenBudget: number;
   /** 单个执行日志文件大小上限（MB），超过后轮转 */
   logFileMaxMB: number;
-  /** opencode 可执行文件 */
+  /**
+   * harness 底座（opencode / dsh）的 CLI 位置。**底座由每个智能体各自选择**
+   * （agents.harness），因此这里不再有「全局档位」开关；模型也由智能体各自指定，
+   * 未指定时不传，交由底座自身的默认模型决定。
+   */
   opencodeBin: string;
-  /** 未指定模型时使用的默认模型 */
-  defaultModel: string;
+  /**
+   * dsh 可执行文件或命令行。支持空格形式以覆盖 npx 形态，
+   * 如 `npx -y @deepseek-ai/dsh`（npx 形态必须带 -y，否则交互式确认会挂起）。
+   */
+  dshBin: string;
+  /**
+   * dsh 的 DSH_HOME（状态、会话、日志与**凭据**的根目录）。
+   *
+   * **默认为空表示不覆盖**，让 dsh 使用它自己的默认目录（`~/.dsh`）——这样用户在 dsh
+   * 侧通过 `dsh auth` 或 Web Models 页面配置的 API Key（存于 `$DSH_HOME/.credentials.yaml`）
+   * 才能被找到；若强行重定向到一个新目录，dsh 会因找不到凭据而报 MISSING_CREDENTIAL。
+   *
+   * 需要与用户既有 dsh 环境隔离时（如 CI、桌面端想独立存放会话）可显式设置。
+   */
+  dshHome: string;
   /** 是否自动调度（系统级开关的初始值） */
   autoScheduleDefault: boolean;
   /** 启动时是否播种默认智能体 */
@@ -77,9 +88,6 @@ const DEFAULTS: OpenPmsConfig = {
   executionTimeoutSec: 18000,
   transientRetryMax: 2,
   transientRetryIntervalSec: 30,
-  commandBlacklistEnabled: true,
-  commandBlacklistExtra: [],
-  commandWhitelist: [],
   workspaceRoots: [],
   memorySinkMode: 'auto',
   memoryMaxPerTask: 5,
@@ -89,7 +97,9 @@ const DEFAULTS: OpenPmsConfig = {
   completedTaskInjectTokenBudget: 2000,
   logFileMaxMB: 10,
   opencodeBin: process.env.OPENCODE_BIN ?? 'opencode',
-  defaultModel: 'opencode/mimo-v2.6-flash-free',
+  dshBin: process.env.DSH_BIN ?? 'dsh',
+  // 默认空 = 不覆盖 DSH_HOME，复用用户既有 dsh 配置（含凭据）
+  dshHome: process.env.OPENPMS_DSH_HOME ? resolve(process.env.OPENPMS_DSH_HOME) : '',
   autoScheduleDefault: true,
   seedDefaultAgents: true,
 };

@@ -3,6 +3,7 @@
  * 建表脚本（幂等）。表结构对应 SDD 第 7 章。
  */
 import type { Db } from './db.js';
+import { TOOL_CATALOG } from './types.js';
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS settings (
@@ -19,6 +20,7 @@ CREATE TABLE IF NOT EXISTS agents (
   avatar          TEXT,
   system_prompt   TEXT NOT NULL,
   model_config    TEXT,
+  harness         TEXT NOT NULL DEFAULT 'opencode',
   status          TEXT NOT NULL DEFAULT 'enabled',
   max_concurrency INTEGER NOT NULL DEFAULT 1,
   timeout_sec     INTEGER,
@@ -96,6 +98,12 @@ CREATE TABLE IF NOT EXISTS tasks (
   enqueue_reason      TEXT,
   pending_fire        INTEGER NOT NULL DEFAULT 0,
   timeout_sec         INTEGER,
+  /**
+   * 待接续的执行 id：重试决定做出时写入（指向被中断的那次执行），
+   * 由执行引擎在下次启动时消费一次——引擎会**复用该执行记录**（同一 execution、同一日志文件）
+   * 并在其会话上继续；为空表示新建执行记录（全新会话）。
+   */
+  resume_execution_id TEXT,
   locked_by           TEXT,
   locked_at           INTEGER,
   last_dispatch_error TEXT,
@@ -167,4 +175,28 @@ CREATE TABLE IF NOT EXISTS tool_audits (
 
 export function migrate(db: Db): void {
   db.exec(DDL);
+  // 老库的 agents 表没有 harness 列（CREATE TABLE IF NOT EXISTS 不会改已存在的表），
+  // 需要显式补列；默认 opencode 与升级前行为一致。
+  addColumnIfMissing(db, 'agents', 'harness', "harness TEXT NOT NULL DEFAULT 'opencode'");
+  // 老库 tasks 表没有 resume_execution_id 列（重试时接续被中断的那次执行）
+  addColumnIfMissing(db, 'tasks', 'resume_execution_id', 'resume_execution_id TEXT');
+  dropRetiredToolGrants(db);
+}
+
+/** 幂等补列：列已存在时不做任何事 */
+function addColumnIfMissing(db: Db, table: string, column: string, columnDdl: string): void {
+  const cols = db.all<{ name: string }>(`PRAGMA table_info(${table})`);
+  if (cols.some((c) => c.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${columnDdl}`);
+}
+
+/**
+ * 工具授权已通用化：只授权 OpenPMS 自己提供的工具。历史上授权过的 harness 原生工具
+ * （fs.* / shell / webfetch / websearch）已不在目录中，这里清理掉这些残留行，
+ * 避免智能体详情里出现「授权了但页面上选不到、且不再有任何效果」的幽灵授权。
+ */
+function dropRetiredToolGrants(db: Db): void {
+  const names = TOOL_CATALOG.map((t) => t.name);
+  const placeholders = names.map(() => '?').join(', ');
+  db.run(`DELETE FROM agent_tools WHERE tool_name NOT IN (${placeholders})`, ...names);
 }
